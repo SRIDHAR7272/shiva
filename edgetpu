@@ -1,0 +1,91 @@
+sudo apt-get update
+sudo apt-get install python3-pip
+pip3 install tensorflow tflite-runtime numpy pillow opencv-python
+
+
+echo "deb [arch=armhf] https://packages.coral.ai/edgetpu_all/debian stable main" | sudo tee /etc/apt/sources.list.d/coral-edgetpu.list
+curl https://packages.coral.ai/edgetpu_all/debian/edgetpu_pubkey.gpg | sudo apt-key add -
+sudo apt-get update
+sudo apt-get install libedgetpu1-std
+
+
+
+import cv2
+import numpy as np
+import tflite_runtime.interpreter as tflite
+from PIL import Image
+
+# Load TFLite model and allocate tensors
+model_path = 'ssd_mobilenet_v2_coco_quant_postprocess_edgetpu.tflite'
+interpreter = tflite.Interpreter(model_path=model_path, experimental_delegates=[tflite.load_delegate('libedgetpu.so.1')])
+interpreter.allocate_tensors()
+
+# Get input and output tensors
+input_details = interpreter.get_input_details()
+output_details = interpreter.get_output_details()
+
+# Define the preprocessing function
+def preprocess_image(image, input_shape):
+    image = Image.fromarray(image).convert('RGB')
+    image = image.resize((input_shape[1], input_shape[2]))
+    image_np = np.array(image, dtype=np.uint8)
+    image_np = np.expand_dims(image_np, axis=0)
+    return image_np
+
+# Define the postprocessing function
+def postprocess_boxes(boxes, classes, scores, threshold=0.5):
+    boxes = boxes[0]  # Remove batch dimension
+    classes = classes[0]
+    scores = scores[0]
+    result_boxes = []
+    for i in range(len(scores)):
+        if scores[i] >= threshold:
+            result_boxes.append({
+                'class': int(classes[i]),
+                'score': scores[i],
+                'box': boxes[i]
+            })
+    return result_boxes
+
+# Initialize video capture
+cap = cv2.VideoCapture(0)  # 0 for default camera
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Preprocess the frame
+    input_data = preprocess_image(frame, input_details[0]['shape'])
+
+    # Set tensor and run inference
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+
+    # Retrieve the output
+    boxes = interpreter.get_tensor(output_details[0]['index'])
+    classes = interpreter.get_tensor(output_details[1]['index'])
+    scores = interpreter.get_tensor(output_details[2]['index'])
+
+    # Postprocess the results
+    detected_objects = postprocess_boxes(boxes, classes, scores)
+
+    # Draw bounding boxes on the frame
+    for obj in detected_objects:
+        box = obj['box']
+        ymin, xmin, ymax, xmax = box
+        ymin, xmin, ymax, xmax = int(ymin * frame.shape[0]), int(xmin * frame.shape[1]), int(ymax * frame.shape[0]), int(xmax * frame.shape[1])
+        cv2.rectangle(frame, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
+        label = f"Class: {obj['class']}, Score: {obj['score']:.2f}"
+        cv2.putText(frame, label, (xmin, ymin - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+
+    # Display the frame
+    cv2.imshow('Object Detection', frame)
+
+    # Exit on 'q' key press
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
